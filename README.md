@@ -5,7 +5,7 @@ Arcademia account. You set the achievements up on the Arcademia manager, and
 your game only ever sends the achievement's API name.
 
 This is the plain .NET build of the SDK, for anything that isn't Unity:
-Godot (C# scripting), MonoGame, Stride, a custom engine, or any .NET tool.
+any engine or framework you write in C#, your own engine, or a .NET tool.
 If you're building in Unity, use the
 [Unity package](https://github.com/Arcademia-Project/ac.arcademia.achievements)
 instead. It has the same API and also draws toasts for you.
@@ -58,6 +58,8 @@ void OnLevelTenCleared()
 
 On a cabinet that's all you need. The launcher shows the toast over your
 game and offers the player a QR code to claim it when the game closes.
+On your own PC nothing appears on screen until you handle `ToastRequested`
+(see [Drawing toasts yourself](#drawing-toasts-yourself)).
 Calling `UnlockAsync` again for the same achievement in the same playthrough
 does nothing, so you don't need to track it yourself.
 
@@ -99,6 +101,8 @@ Task<AchievementsResult> ArcademiaAchievements.GetAchievementsAsync()
 Task<OverlayResult> ArcademiaAchievements.OpenOverlayAsync()
 Task<AchievementsPingResult> ArcademiaAchievements.PingAsync()
 Task<SandboxClaimResult> ArcademiaAchievements.RequestSandboxClaimAsync(Action<string> onClaimLink = null, CancellationToken ct = default)
+bool ArcademiaAchievements.TryGetToast(out AchievementToast toast)
+Task<byte[]> ArcademiaAchievements.GetIconBytesAsync(Achievement achievement)
 void ArcademiaAchievements.StartNewSandboxSession()
 void ArcademiaAchievements.Configure(ArcademiaAchievementSettings settings)
 void ArcademiaAchievements.Shutdown()
@@ -122,8 +126,8 @@ event Action ArcademiaAchievements.OverlayClosed
 `TeamHadIt`, `TeamLabel` and `TeamClaimedBy` tell you whether the player's
 team already had the achievement.
 
-Events are raised from the code that awaited the call. If your engine has
-no synchronisation context (MonoGame, a console app) that can be a
+Events are raised from the code that awaited the call. If your game has
+no synchronisation context, that can be a
 thread-pool thread, so hand the work back to your main loop before touching
 engine objects.
 
@@ -136,17 +140,35 @@ The launcher draws toasts on a cabinet, so you usually don't need to.
 - on a cabinet when the launcher can't draw over your game (true exclusive
   fullscreen, see below).
 
+The simplest way is to ask for toasts once a frame from your game loop.
+You get each toast on the thread that calls it, so you can draw it straight
+away:
+
+```csharp
+while (ArcademiaAchievements.TryGetToast(out var toast))
+    MyHud.ShowToast(toast.Title, toast.Name, toast.Subtitle, toast.IconBytes);
+```
+
+Or subscribe to the event, which runs on the thread that awaited the unlock.
+Once something is subscribed, toasts go to the event instead of
+`TryGetToast`, so using both never shows a toast twice:
+
 ```csharp
 ArcademiaAchievements.ToastRequested += toast =>
 {
-    MyHud.ShowToast(toast.Title, toast.Name, toast.Subtitle, toast.IconPath ?? toast.IconUrl);
+    MyHud.ShowToast(toast.Title, toast.Name, toast.Subtitle, toast.IconBytes);
 };
 ```
 
+If neither is set up, the SDK writes a warning to the console and the
+debugger output each time a toast is dropped.
+
 `Title` and `Subtitle` are ready-made text. `TeamHadIt` is `true` when the
 player's team already held the achievement, which is worth styling
-differently (the launcher greys that toast out). `IconPath` is a local file
-the launcher already downloaded, when there is one. Otherwise use `IconUrl`.
+differently (the launcher greys that toast out). `IconBytes` is the icon,
+already loaded, and `IconExtension` says whether it's a `.png` or `.jpg`.
+`GetIconBytesAsync(achievement)` does the same for your own achievements
+screen.
 
 ### Achievements screen
 

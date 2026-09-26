@@ -14,6 +14,9 @@ namespace Arcademia.Achievements
         private const string SettingsFileName = "arcademia.json";
         private const int OverlayResponseTimeoutMs = 60 * 60 * 1000;
         private const int SandboxClaimPollMs = 2000;
+        private const int MaxPendingToasts = 16;
+        private static readonly TimeSpan IconTimeout = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan UncollectedToastWarningDelay = TimeSpan.FromSeconds(3);
 
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
         {
@@ -26,6 +29,9 @@ namespace Arcademia.Achievements
         private static bool _initialised;
         private static Guid _sandboxSession = Guid.NewGuid();
         private static readonly HashSet<string> SessionUnlocks = new HashSet<string>(StringComparer.Ordinal);
+        private static readonly Queue<AchievementToast> PendingToasts = new Queue<AchievementToast>();
+        private static readonly Dictionary<string, byte[]> IconCache = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        private static bool _toastsPolled;
 
         public static event Action<UnlockResult> Unlocked;
         public static event Action<AchievementToast> ToastRequested;
@@ -74,8 +80,109 @@ namespace Arcademia.Achievements
             _settings = null;
             _initialised = false;
             lock (Gate)
+            {
                 SessionUnlocks.Clear();
+                PendingToasts.Clear();
+                IconCache.Clear();
+                _toastsPolled = false;
+            }
             _sandboxSession = Guid.NewGuid();
+        }
+
+        public static bool TryGetToast(out AchievementToast toast)
+        {
+            lock (Gate)
+            {
+                _toastsPolled = true;
+                if (PendingToasts.Count > 0)
+                {
+                    toast = PendingToasts.Dequeue();
+                    return true;
+                }
+            }
+
+            toast = null;
+            return false;
+        }
+
+        public static Task<byte[]> GetIconBytesAsync(Achievement achievement) =>
+            achievement == null ? Task.FromResult<byte[]>(null) : LoadIconAsync(achievement.IconPath, achievement.IconUrl);
+
+        private static async Task<byte[]> LoadIconAsync(string iconPath, string iconUrl)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(iconPath) && File.Exists(iconPath))
+                    return File.ReadAllBytes(iconPath);
+
+                if (string.IsNullOrEmpty(iconUrl))
+                    return null;
+
+                lock (Gate)
+                    if (IconCache.TryGetValue(iconUrl, out var cached))
+                        return cached;
+
+                var bytes = await SandboxTransport.GetBytesAsync(iconUrl, IconTimeout);
+                if (bytes != null)
+                    lock (Gate)
+                        IconCache[iconUrl] = bytes;
+                return bytes;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("[Arcademia] Could not load achievement icon: " + ex.Message);
+                return null;
+            }
+        }
+
+        internal static string SniffImageExtension(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length < 4)
+                return null;
+            if (bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47)
+                return ".png";
+            if (bytes[0] == 0xFF && bytes[1] == 0xD8)
+                return ".jpg";
+            if (bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46)
+                return ".gif";
+            return null;
+        }
+
+        private static void PublishToast(AchievementToast toast)
+        {
+            var handler = ToastRequested;
+            if (handler != null)
+            {
+                Raise(handler, toast);
+                return;
+            }
+
+            lock (Gate)
+            {
+                PendingToasts.Enqueue(toast);
+                while (PendingToasts.Count > MaxPendingToasts)
+                    PendingToasts.Dequeue();
+            }
+
+            _ = WarnIfUncollectedAsync(toast);
+        }
+
+        private static async Task WarnIfUncollectedAsync(AchievementToast toast)
+        {
+            await Task.Delay(UncollectedToastWarningDelay);
+
+            bool uncollected;
+            lock (Gate)
+                uncollected = !_toastsPolled && PendingToasts.Contains(toast);
+
+            if (!uncollected || ToastRequested != null)
+                return;
+
+            var warning = "[Arcademia] The toast for \"" + toast.Name + "\" wasn't shown. "
+                + "Nothing handles ArcademiaAchievements.ToastRequested or calls ArcademiaAchievements.TryGetToast, "
+                + "and in sandbox mode your game draws the toasts. See the Drawing toasts section of the SDK docs.";
+            Console.Error.WriteLine(warning);
+            System.Diagnostics.Debug.WriteLine(warning);
         }
 
         public static void StartNewSandboxSession()
@@ -274,7 +381,7 @@ namespace Arcademia.Achievements
             {
                 Raise(Unlocked, result);
                 if (result.ShowToastInGame)
-                    Raise(ToastRequested, new AchievementToast
+                    PublishToast(new AchievementToast
                     {
                         ApiName = result.ApiName,
                         Name = result.Name,
@@ -284,6 +391,7 @@ namespace Arcademia.Achievements
                         TeamHadIt = result.TeamHadIt,
                         TeamLabel = result.TeamLabel,
                         AllowPersonal = result.AllowPersonal,
+                        IconBytes = await LoadIconAsync(result.IconPath, result.IconUrl),
                     });
             }
 

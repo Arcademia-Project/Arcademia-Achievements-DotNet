@@ -112,6 +112,9 @@ namespace Arcademia.Achievements
         public bool TeamHadIt;
         public string TeamLabel;
         public bool AllowPersonal;
+        public byte[] IconBytes;
+
+        public string IconExtension => ArcademiaAchievements.SniffImageExtension(IconBytes);
 
         public string Title => TeamHadIt
             ? "Already held by " + (string.IsNullOrEmpty(TeamLabel) ? "your team" : TeamLabel)
